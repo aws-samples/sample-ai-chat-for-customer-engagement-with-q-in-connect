@@ -1,0 +1,877 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Q for customers - Main (uksb-mv8fzn8jjm) (tag:main)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General
+        Parameters:
+          - ConnectInstanceId
+          - DeploymentId
+          - RemovalPolicy
+      - Label:
+          default: Web Crawler Configuration
+        Parameters:
+          - WebsiteUrl
+          - ScopeFilter
+          - ExclusionFilter
+          - InclusionFilter
+    ParameterLabels:
+      ConnectInstanceId:
+        default: Amazon Connect Instance ID
+      DeploymentId:
+        default: Deployment Identifier
+      ExclusionFilter:
+        default: URL Exclusion Patterns
+      InclusionFilter:
+        default: URL Inclusion Patterns
+      RemovalPolicy:
+        default: Removal Policy
+      ScopeFilter:
+        default: Crawling Scope
+      WebsiteUrl:
+        default: Website URL
+
+Parameters:
+  ConnectInstanceId:
+    Description: The ID of the Connect instance (E.g. 00000000-aaaa-bbbb-cccc-111111111111)
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9\-]+$
+    ConstraintDescription: Must contain only alphanumeric characters and dashes
+
+  DeploymentId:
+    Description: Unique identifier for this deployment
+    Type: String
+    Default: q-for-customers
+    AllowedPattern: ^[a-zA-Z0-9\-_]+$
+    ConstraintDescription: Must contain only alphanumeric characters, dashes, and underscores
+    MaxLength: 32
+    MinLength: 1
+
+  ExclusionFilter:
+    Description: Array of regex patterns to exclude URLs from scraping.
+    Type: CommaDelimitedList
+    Default: .*\.(csv|doc|docx|md|pdf|ppt|pptx|txt|xls|xlsx)$,.*\?.*,.*/(admin|administrator|article|blog|comment|composer|core|events|login|media|modules|profiles|search|signup|themes|user|wp-admin)/.*
+
+  InclusionFilter:
+    Description: Array of regex pattern to include URLs from scraping. (Leave blank for anything not excluded)
+    Type: CommaDelimitedList
+    Default: ""
+
+  RemovalPolicy:
+    Description: Removal policy for resources
+    Type: String
+    AllowedValues:
+      - Delete
+      - Retain
+    Default: Delete
+
+  ScopeFilter:
+    Description: Scope for URL crawling
+    Type: String
+    AllowedValues:
+      - HOST_ONLY
+      - SUBDOMAINS
+    Default: HOST_ONLY
+
+  WebsiteUrl:
+    Description: Website URL to scrape for knowledge base (E.g. https://example.com)
+    Type: String
+    Default: https://example.com
+    AllowedPattern: ^https://[^/]+(?:/[^/].*[^/])?$
+    ConstraintDescription: Must be a valid HTTPS URL. No trailing `/`
+
+Conditions:
+  HasExclusionFilter: !Not
+    - !Equals
+      - !Join
+        - ""
+        - !Ref ExclusionFilter
+      - ""
+
+  HasInclusionFilter: !Not
+    - !Equals
+      - !Join
+        - ""
+        - !Ref InclusionFilter
+      - ""
+
+Transform: AWS::LanguageExtensions
+
+Resources:
+  ConnectAndWisdomIntegrationCustomResourceFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: Custom resource Lambda does not require VPC configuration
+          - id: W92
+            reason: Custom resource Lambda does not require reserved concurrency
+    Properties:
+      Code:
+        ZipFile: |-
+          const { ConnectClient, CreateIntegrationAssociationCommand, DeleteIntegrationAssociationCommand } = require("@aws-sdk/client-connect");
+          const https = require('https');
+          const { URL } = require('url');
+
+          /**
+           * Lambda function that handles CloudFormation custom resource events for Amazon Connect IntegrationAssociation.
+           * Supports CREATE, UPDATE, and DELETE operations.
+           * For UPDATE, it will delete the existing association and create a new one.
+           */
+          exports.handler = async (event) => {
+          console.log('Received event:', JSON.stringify(event, null, 2));
+
+          try {
+              let responseData = {};
+              let physicalResourceId;
+
+              // Initialize the Connect client
+              const client = new ConnectClient({ region: process.env.AWS_REGION });
+
+              switch (event.RequestType) {
+              case 'Create':
+                  responseData = await createIntegrationAssociation(client, event);
+                  physicalResourceId = responseData.IntegrationAssociationId;
+                  break;
+
+              case 'Update':
+                  // For updates, delete the old association and create a new one
+                  if (event.PhysicalResourceId) {
+                  await deleteIntegrationAssociation(client, {
+                      InstanceId: event.ResourceProperties.InstanceId,
+                      IntegrationAssociationId: event.PhysicalResourceId
+                  });
+                  }
+                  responseData = await createIntegrationAssociation(client, event);
+                  physicalResourceId = responseData.IntegrationAssociationId;
+                  break;
+
+              case 'Delete':
+                  if (event.PhysicalResourceId) {
+                  await deleteIntegrationAssociation(client, {
+                      InstanceId: event.ResourceProperties.InstanceId,
+                      IntegrationAssociationId: event.PhysicalResourceId
+                  });
+                  }
+                  break;
+
+              default:
+                  throw new Error(`Unsupported request type: ${event.RequestType}`);
+              }
+
+              const responseWithId = { ...responseData, PhysicalResourceId: physicalResourceId || event.PhysicalResourceId };
+              await sendResponse(event, 'SUCCESS', responseWithId, physicalResourceId || event.PhysicalResourceId);
+              return responseWithId;
+          } catch (error) {
+              console.error('Error:', error);
+              await sendResponse(event, 'FAILED', { Error: error.message }, event.PhysicalResourceId);
+              throw error;
+          }
+          };
+
+          /**
+           * Creates an integration association in Amazon Connect
+           */
+          async function createIntegrationAssociation(client, event) {
+          const input = {
+              InstanceId: event.ResourceProperties.InstanceId,
+              IntegrationType: "WISDOM_ASSISTANT",
+              IntegrationArn: event.ResourceProperties.IntegrationArn,
+              Tags: {
+              "AmazonConnectEnabled": "True",
+              },
+          };
+
+          console.log('Creating integration association with input:', JSON.stringify(input, null, 2));
+          const command = new CreateIntegrationAssociationCommand(input);
+          const response = await client.send(command);
+          console.log('Integration association created:', JSON.stringify(response, null, 2));
+          return response;
+          }
+
+          /**
+           * Deletes an integration association from Amazon Connect
+           */
+          async function deleteIntegrationAssociation(client, params) {
+          console.log('Deleting integration association with params:', JSON.stringify(params, null, 2));
+          try {
+              const command = new DeleteIntegrationAssociationCommand(params);
+              const response = await client.send(command);
+              console.log('Integration association deleted');
+              return response;
+          } catch (error) {
+              if (error.name === 'ResourceNotFoundException') {
+              console.log('Integration association already deleted or not found');
+              return { status: 'SUCCESS' };
+              }
+              throw error;
+          }
+          }
+
+          /**
+           * Sends a response to CloudFormation
+           */
+          async function sendResponse(event, status, data, physicalResourceId) {
+          const responseBody = JSON.stringify({
+              Status: status,
+              Reason: `See the details in CloudWatch Log Stream: ${process.env.AWS_LAMBDA_LOG_STREAM_NAME}`,
+              PhysicalResourceId: physicalResourceId || event.LogicalResourceId,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              Data: data,
+          });
+
+          console.log('Response body:', responseBody);
+
+          const parsedUrl = new URL(event.ResponseURL);
+          const options = {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'PUT',
+              headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': responseBody.length,
+              },
+          };
+
+          return new Promise((resolve, reject) => {
+              const request = https.request(options, (response) => {
+              console.log(`Status code: ${response.statusCode}`);
+              response.on('data', () => { });
+              response.on('end', () => {
+                  resolve();
+              });
+              });
+
+              request.on('error', (error) => {
+              console.error('Error sending response:', error);
+              reject(error);
+              });
+
+              request.write(responseBody);
+              request.end();
+          });
+          }
+      FunctionName: !Sub ${AWS::StackName}-wisdom-integration
+      Handler: index.handler
+      Role: !GetAtt ConnectAndWisdomIntegrationCustomResourceRole.Arn
+      Runtime: nodejs22.x
+      Timeout: 10
+
+  ConnectAndWisdomIntegrationCustomResourcePolicyPermitConnect:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - connect:CreateIntegrationAssociation
+              - connect:DeleteIntegrationAssociation
+              - connect:ListIntegrationAssociations
+              - connect:TagResource
+            Effect: Allow
+            Resource: !Sub arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/*
+        Version: "2012-10-17"
+      PolicyName: PermitConnect
+      Roles:
+        - !Ref ConnectAndWisdomIntegrationCustomResourceRole
+
+  ConnectAndWisdomIntegrationCustomResourcePolicyPermitIam:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - iam:UpdateRole
+              - iam:DeleteRolePolicy
+              - iam:PutRolePolicy
+            Effect: Allow
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/connect.amazonaws.com/*
+        Version: "2012-10-17"
+      PolicyName: PermitIam
+      Roles:
+        - !Ref ConnectAndWisdomIntegrationCustomResourceRole
+
+  ConnectAndWisdomIntegrationCustomResourcePolicyPermitWisdom:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - wisdom:GetAssistant
+              - wisdom:ListAssistants
+              - wisdom:TagResource
+            Effect: Allow
+            Resource: !Sub arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:assistant/${WisdomAssistant}
+        Version: "2012-10-17"
+      PolicyName: PermitWisdom
+      Roles:
+        - !Ref ConnectAndWisdomIntegrationCustomResourceRole
+
+  ConnectAndWisdomIntegrationCustomResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ContactFlow:
+    Type: AWS::Connect::ContactFlow
+    Properties:
+      Content:
+        Fn::ToJsonString:
+          Actions:
+            - Identifier: UpdateFlowLoggingBehavior
+              Parameters:
+                FlowLoggingBehavior: Enabled
+              Transitions:
+                NextAction: UpdateContactTextToSpeechVoice
+              Type: UpdateFlowLoggingBehavior
+            - Identifier: UpdateContactTextToSpeechVoice
+              Parameters:
+                TextToSpeechVoice: Emma
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: MessageParticipant-GenericError
+                NextAction: UpdateContactTextToSpeechVoice-UpdateContactData
+              Type: UpdateContactTextToSpeechVoice
+            - Identifier: UpdateContactTextToSpeechVoice-UpdateContactData
+              Parameters:
+                LanguageCode: en-GB
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: MessageParticipant-GenericError
+                NextAction: CreateWisdomSession
+              Type: UpdateContactData
+            - Identifier: CreateWisdomSession
+              Parameters:
+                WisdomAssistantArn: !GetAtt WisdomAssistant.AssistantArn
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: MessageParticipant-GenericError
+                NextAction: CreateWisdomSession-UpdateContactData
+              Type: CreateWisdomSession
+            - Identifier: CreateWisdomSession-UpdateContactData
+              Parameters:
+                WisdomSessionArn: $.Wisdom.SessionArn
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: MessageParticipant-GenericError
+                NextAction: UpdateContactAttributes-SetMsg-Welcome
+              Type: UpdateContactData
+            - Identifier: DisconnectParticipant
+              Parameters: {}
+              Transitions: {}
+              Type: DisconnectParticipant
+            - Identifier: MessageParticipant-GenericError
+              Parameters:
+                Text: Sorry, somethings gone wrong. Please try again.
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: DisconnectParticipant
+                NextAction: DisconnectParticipant
+              Type: MessageParticipant
+            - Identifier: UpdateContactAttributes-SetMsg-Retry
+              Parameters:
+                Attributes:
+                  msg: Sorry, I'm not sure how I can help you. Please can you rephrase your question.
+                TargetContact: Current
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: MessageParticipant-GenericError
+                NextAction: ConnectParticipantWithLexBot
+              Type: UpdateContactAttributes
+            - Identifier: UpdateContactAttributes-SetMsg-Welcome
+              Parameters:
+                Attributes:
+                  msg: I'm your ACME Council AI assistant. Ask me a question to start a conversation. I'll respond using data from ACME Council.
+                TargetContact: Current
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingError
+                    NextAction: MessageParticipant-GenericError
+                NextAction: ConnectParticipantWithLexBot
+              Type: UpdateContactAttributes
+            - Identifier: ConnectParticipantWithLexBot
+              Parameters:
+                LexV2Bot:
+                  AliasArn: !GetAtt LexBotAlias.Arn
+                Text: $.Attributes.msg
+              Transitions:
+                Errors:
+                  - ErrorType: NoMatchingCondition
+                    NextAction: DisconnectParticipant
+                  - ErrorType: NoMatchingError
+                    NextAction: UpdateContactAttributes-SetMsg-Retry
+                NextAction: UpdateContactAttributes-SetMsg-Retry
+              Type: ConnectParticipantWithLexBot
+          Metadata:
+            ActionMetadata:
+              ConnectParticipantWithLexBot:
+                conditionMetadata: []
+                lexV2BotAliasName: Live
+                lexV2BotName: !Sub ${DeploymentId}
+                parameters:
+                  LexV2Bot:
+                    AliasArn:
+                      displayName: Live
+                      lexV2BotName: !Sub ${DeploymentId}
+                      useLexBotDropdown: true
+                  Text:
+                    useDynamic: true
+                useDynamic: true
+                useLexBotDropdown: true
+              CreateWisdomSession:
+                children:
+                  - CreateWisdomSession-UpdateContactData
+                fragments:
+                  SetContactData: CreateWisdomSession-UpdateContactData
+                parameters:
+                  WisdomAssistantArn:
+                    displayName: !GetAtt WisdomAssistant.AssistantArn
+              UpdateContactTextToSpeechVoice:
+                children:
+                  - UpdateContactTextToSpeechVoice-UpdateContactData
+                fragments:
+                  SetContactData: UpdateContactTextToSpeechVoice-UpdateContactData
+                overrideConsoleVoice: false
+                overrideLanguageAttribute: true
+                parameters:
+                  TextToSpeechVoice:
+                    languageCode: en-GB
+            Annotations: []
+            description: ""
+            hash: {}
+            name: q4c-sample-flow
+            status: PUBLISHED
+            type: contactFlow
+          StartAction: UpdateFlowLoggingBehavior
+          Version: "2019-10-30"
+      InstanceArn: !Sub arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}
+      Name: !Sub ${DeploymentId}-flow
+      State: ACTIVE
+      Tags:
+        - Key: AmazonConnectEnabled
+          Value: "True"
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+      Type: CONTACT_FLOW
+
+  KnowledgeBase:
+    Type: AWS::Wisdom::KnowledgeBase
+    Properties:
+      KnowledgeBaseType: MANAGED
+      Name: !Sub ${DeploymentId}-kb
+      SourceConfiguration:
+        ManagedSourceConfiguration:
+          WebCrawlerConfiguration:
+            CrawlerLimits:
+              RateLimit: 300
+            ExclusionFilters: !If
+              - HasExclusionFilter
+              - !Ref ExclusionFilter
+              - !Ref AWS::NoValue
+            InclusionFilters: !If
+              - HasInclusionFilter
+              - !Ref InclusionFilter
+              - !Ref AWS::NoValue
+            Scope: !Ref ScopeFilter
+            UrlConfiguration:
+              SeedUrls:
+                - Url: !Ref WebsiteUrl
+      Tags:
+        - Key: AmazonConnectEnabled
+          Value: "True"
+
+  LexBot:
+    Type: AWS::Lex::Bot
+    Properties:
+      AutoBuildBotLocales: true
+      BotLocales:
+        - Description: Q-for-Customers
+          Intents:
+            - Name: AmazonQIntent
+              ParentIntentSignature: AMAZON.QInConnectIntent
+              QInConnectIntentConfiguration:
+                QInConnectAssistantConfiguration:
+                  AssistantArn: !GetAtt WisdomAssistant.AssistantArn
+            - Name: FallbackIntent
+              ParentIntentSignature: AMAZON.FallbackIntent
+          LocaleId: en_GB
+          NluConfidenceThreshold: "0.4"
+      BotTags:
+        - Key: AmazonConnectEnabled
+          Value: "True"
+      DataPrivacy:
+        ChildDirected: false
+      IdleSessionTTLInSeconds: 300
+      Name: !Sub ${DeploymentId}
+      RoleArn: !GetAtt LexBotRole.Arn
+
+  LexBotAlias:
+    Type: AWS::Lex::BotAlias
+    Properties:
+      BotAliasLocaleSettings:
+        - BotAliasLocaleSetting:
+            Enabled: true
+          LocaleId: en_GB
+      BotAliasName: Live
+      BotAliasTags:
+        - Key: AmazonConnectEnabled
+          Value: "True"
+      BotId: !Ref LexBot
+      BotVersion: !GetAtt LexBotVersion.BotVersion
+      ConversationLogSettings:
+        TextLogSettings:
+          - Destination:
+              CloudWatch:
+                CloudWatchLogGroupArn: !GetAtt LexBotLogGroup.Arn
+                LogPrefix: !Ref DeploymentId
+            Enabled: true
+
+  LexBotConnectLexIntegration:
+    Type: AWS::Connect::IntegrationAssociation
+    Properties:
+      InstanceId: !Sub arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}
+      IntegrationArn: !GetAtt LexBotAlias.Arn
+      IntegrationType: LEX_BOT
+
+  LexBotLogGroup:
+    DeletionPolicy: !Ref RemovalPolicy
+    UpdateReplacePolicy: !Ref RemovalPolicy
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !Ref LexBotLogGroupKmsKeyAlias
+      LogGroupName: !Sub /q4c/${DeploymentId}-main/chatbot/${LexBot}
+      RetentionInDays: 7
+
+  LexBotLogGroupKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: LexBotLogGroupKmsKey
+      EnableKeyRotation: true
+      KeyPolicy:
+        Id: lex-logs-key
+        Statement:
+          - Action:
+              - kms:*
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Resource: '*'
+            Sid: Enable IAM User Permissions
+          - Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Resource: '*'
+            Sid: Allow CloudWatch Logs
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LexBotRole.Arn
+            Resource: '*'
+            Sid: Allow Lex Bot Role
+        Version: "2012-10-17"
+
+  LexBotLogGroupKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/LexBotLogGroupKmsKeyAlias
+      TargetKeyId: !Ref LexBotLogGroupKmsKey
+
+  LexBotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lexv2.amazonaws.com
+        Version: "2012-10-17"
+
+  LexBotRolePolicyPermitComprehend:
+    Type: AWS::IAM::Policy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: Actions don't support resource-level permissions.
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - comprehend:DetectDominantLanguage
+              - comprehend:DetectSentiment
+            Effect: Allow
+            Resource: '*'
+        Version: "2012-10-17"
+      PolicyName: PermitComprehend
+      Roles:
+        - !Ref LexBotRole
+
+  LexBotRolePolicyPermitLogging:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/q4c/${DeploymentId}-main/chatbot/*
+        Version: "2012-10-17"
+      PolicyName: PermitLogging
+      Roles:
+        - !Ref LexBotRole
+
+  LexBotRolePolicyPermitPolly:
+    Type: AWS::IAM::Policy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: Actions don't support resource-level permissions.
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - polly:SynthesizeSpeech
+            Effect: Allow
+            Resource: '*'
+        Version: "2012-10-17"
+      PolicyName: PermitPolly
+      Roles:
+        - !Ref LexBotRole
+
+  LexBotRolePolicyPermitWisdomAssistant:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - wisdom:CreateSession
+              - wisdom:GetAssistant
+            Effect: Allow
+            Resource: !GetAtt WisdomAssistant.AssistantArn
+        Version: "2012-10-17"
+      PolicyName: PermitWisdomAssistant
+      Roles:
+        - !Ref LexBotRole
+
+  LexBotRolePolicyPermitWisdomSession:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - wisdom:SendMessage
+              - wisdom:GetNextMessage
+            Effect: Allow
+            Resource: !Sub arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:session/${WisdomAssistant.AssistantId}/*
+        Version: "2012-10-17"
+      PolicyName: PermitWisdomSession
+      Roles:
+        - !Ref LexBotRole
+
+  LexBotVersion:
+    Type: AWS::Lex::BotVersion
+    Properties:
+      BotId: !Ref LexBot
+      BotVersionLocaleSpecification:
+        - BotVersionLocaleDetails:
+            SourceBotVersion: DRAFT
+          LocaleId: en_GB
+
+  WisdomAssistant:
+    Type: AWS::Wisdom::Assistant
+    Properties:
+      Name: !Ref DeploymentId
+      Tags:
+        - Key: AmazonConnectEnabled
+          Value: "True"
+      Type: AGENT
+
+  WisdomAssistantAssociateKnowledgeBase:
+    Type: AWS::Wisdom::AssistantAssociation
+    Properties:
+      AssistantId: !Ref WisdomAssistant
+      Association:
+        KnowledgeBaseId: !Ref KnowledgeBase
+      AssociationType: KNOWLEDGE_BASE
+      Tags:
+        - Key: AmazonConnectEnabled
+          Value: "True"
+
+  WisdomAssistantLogGroup:
+    DeletionPolicy: !Ref RemovalPolicy
+    UpdateReplacePolicy: !Ref RemovalPolicy
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !Ref WisdomAssistantLogGroupKmsKeyAlias
+      LogGroupName: !Sub /q4c/${DeploymentId}-main/assistant/${WisdomAssistant}
+      RetentionInDays: 7
+
+  WisdomAssistantLogGroupKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: WisdomAssistantLogGroupKmsKey
+      EnableKeyRotation: true
+      KeyPolicy:
+        Id: wisdom-logs-key
+        Statement:
+          - Action:
+              - kms:*
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Resource: '*'
+            Sid: Enable IAM User Permissions
+          - Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Resource: '*'
+            Sid: Allow CloudWatch Logs
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Effect: Allow
+            Principal:
+              Service: wisdom.amazonaws.com
+            Resource: '*'
+            Sid: Allow Wisdom Assistant
+        Version: "2012-10-17"
+
+  WisdomAssistantLogGroupKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/WisdomAssistantLogGroupKmsKeyAlias
+      TargetKeyId: !Ref WisdomAssistantLogGroupKmsKey
+
+  WisdomAssistantLogsDelivery:
+    DeletionPolicy: !Ref RemovalPolicy
+    UpdateReplacePolicy: !Ref RemovalPolicy
+    Type: AWS::Logs::Delivery
+    DependsOn:
+      - WisdomAssistantLogsDeliverySource
+      - WisdomAssistantLogsDeliveryDestination
+    Properties:
+      DeliveryDestinationArn: !GetAtt WisdomAssistantLogsDeliveryDestination.Arn
+      DeliverySourceName: !Ref WisdomAssistantLogsDeliverySource
+
+  WisdomAssistantLogsDeliveryDestination:
+    DeletionPolicy: !Ref RemovalPolicy
+    UpdateReplacePolicy: !Ref RemovalPolicy
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      DestinationResourceArn: !GetAtt WisdomAssistantLogGroup.Arn
+      Name: !Ref DeploymentId
+      OutputFormat: json
+
+  WisdomAssistantLogsDeliverySource:
+    DeletionPolicy: !Ref RemovalPolicy
+    UpdateReplacePolicy: !Ref RemovalPolicy
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      LogType: EVENT_LOGS
+      Name: !Ref DeploymentId
+      ResourceArn: !GetAtt WisdomAssistant.AssistantArn
+
+  WisdomIntegrationAssociation:
+    DeletionPolicy: !Ref RemovalPolicy
+    UpdateReplacePolicy: !Ref RemovalPolicy
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      InstanceId: !Ref ConnectInstanceId
+      IntegrationArn: !GetAtt WisdomAssistant.AssistantArn
+      ServiceTimeout: 10
+      ServiceToken: !GetAtt ConnectAndWisdomIntegrationCustomResourceFunction.Arn
+
+Outputs:
+  ContactFlowArn:
+    Description: The ARN of the Contact Flow
+    Value: !Ref ContactFlow
+
+  ContactFlowId:
+    Description: The ID of the Contact Flow
+    Value: !GetAtt ContactFlow.ContactFlowArn
+
+  KnowledgeBaseArn:
+    Description: The ARN of the Knowledge Base
+    Value: !GetAtt KnowledgeBase.KnowledgeBaseArn
+
+  KnowledgeBaseId:
+    Description: The ID of the Knowledge Base
+    Value: !Ref KnowledgeBase
+
+  LexBotAliasArn:
+    Description: The ARN of the Lex bot alias
+    Value: !GetAtt LexBotAlias.Arn
+
+  LexBotAliasId:
+    Description: The ID of the Lex bot alias
+    Value: !GetAtt LexBotAlias.BotAliasId
+
+  LexBotAliasName:
+    Description: The name of the Lex bot alias
+    Value: !Ref LexBotAlias
+
+  LexBotId:
+    Description: The ID of the Lex bot
+    Value: !GetAtt LexBot.Id
+
+  LexBotName:
+    Description: The name of the Lex bot
+    Value: !Sub ${DeploymentId}
+
+  WisdomAssistantArn:
+    Description: The ARN of the Wisdom Assistant
+    Value: !GetAtt WisdomAssistant.AssistantArn
+
+  WisdomAssistantAssociateKnowledgeBaseArn:
+    Description: The ARN of the Assistant Association
+    Value: !GetAtt WisdomAssistantAssociateKnowledgeBase.AssistantAssociationArn
+
+  WisdomAssistantAssociateKnowledgeBaseId:
+    Description: The ID of the Assistant Association
+    Value: !Ref WisdomAssistantAssociateKnowledgeBase
+
+  WisdomAssistantId:
+    Description: The ID of the Wisdom Assistant
+    Value: !Ref WisdomAssistant
+
+  WisdomConnectIntegrationAssociationId:
+    Description: The ID of the Connect-Wisdom integration association
+    Value: !Ref WisdomIntegrationAssociation

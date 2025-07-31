@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Q for customers - Instance (uksb-mv8fzn8jjm) (tag:instance)
+
+Parameters:
+  DeploymentId:
+    Description: Unique identifier for this deployment
+    Type: String
+    Default: q4c-sample
+    AllowedPattern: ^[a-zA-Z0-9\-_]+$
+    MaxLength: 64
+    MinLength: 1
+
+Resources:
+  ConnectInstance:
+    Type: AWS::Connect::Instance
+    Properties:
+      Attributes:
+        AutoResolveBestVoices: true
+        ContactLens: false
+        ContactflowLogs: true
+        EarlyMedia: false
+        InboundCalls: false
+        OutboundCalls: false
+      IdentityManagementType: CONNECT_MANAGED
+      InstanceAlias: !Sub Q4C-${DeploymentId}-${AWS::AccountId}-${AWS::Region}
+
+Outputs:
+  ConnectInstanceAlias:
+    Description: The alias of the Connect instance
+    Value: !Sub ${DeploymentId}-${AWS::AccountId}-${AWS::Region}
+
+  ConnectInstanceArn:
+    Description: The ARN of the Connect instance
+    Value: !GetAtt ConnectInstance.Arn
+
+  ConnectInstanceId:
+    Description: The ID of the Connect instance
+    Value: !GetAtt ConnectInstance.Id
+
+  DeploymentId:
+    Description: Unique identifier for this deployment
+    Value: !Ref DeploymentId
