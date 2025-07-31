@@ -10,7 +10,12 @@ There are 2 AWS Cloudformation tempaltes to deploy, starting with the `instance`
 ### Quick Deployment
 
 - Quick deploy instance
+  1. [Download template](https://raw.githubusercontent.com/aws-samples/sample-ai-chat-for-customer-engagement-with-q-in-connect/refs/heads/main/q4c-template-instance.yaml)
+  2. [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=q-for-customers-instance)
+
 - Quick deploy main
+  1. [Download template](https://raw.githubusercontent.com/aws-samples/sample-ai-chat-for-customer-engagement-with-q-in-connect/refs/heads/main/q4c-template-main.yaml)
+  2. [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=q-for-customers-main)
 
 ### Console Deployment
 
