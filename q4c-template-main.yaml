@@ -558,7 +558,7 @@ Resources:
     UpdateReplacePolicy: !Ref RemovalPolicy
     Type: AWS::Logs::LogGroup
     Properties:
-      KmsKeyId: !Ref LexBotLogGroupKmsKeyAlias
+      KmsKeyId: !GetAtt LexBotLogGroupKmsKey.Arn
       LogGroupName: !Sub /q4c/${DeploymentId}-main/chatbot/${LexBot}
       RetentionInDays: 7
 
@@ -597,12 +597,6 @@ Resources:
             Resource: '*'
             Sid: Allow Lex Bot Role
         Version: "2012-10-17"
-
-  LexBotLogGroupKmsKeyAlias:
-    Type: AWS::KMS::Alias
-    Properties:
-      AliasName: alias/LexBotLogGroupKmsKeyAlias
-      TargetKeyId: !Ref LexBotLogGroupKmsKey
 
   LexBotRole:
     Type: AWS::IAM::Role
@@ -734,7 +728,7 @@ Resources:
     UpdateReplacePolicy: !Ref RemovalPolicy
     Type: AWS::Logs::LogGroup
     Properties:
-      KmsKeyId: !Ref WisdomAssistantLogGroupKmsKeyAlias
+      KmsKeyId: !GetAtt WisdomAssistantLogGroupKmsKey.Arn
       LogGroupName: !Sub /q4c/${DeploymentId}-main/assistant/${WisdomAssistant}
       RetentionInDays: 7
 
@@ -773,12 +767,6 @@ Resources:
             Resource: '*'
             Sid: Allow Wisdom Assistant
         Version: "2012-10-17"
-
-  WisdomAssistantLogGroupKmsKeyAlias:
-    Type: AWS::KMS::Alias
-    Properties:
-      AliasName: alias/WisdomAssistantLogGroupKmsKeyAlias
-      TargetKeyId: !Ref WisdomAssistantLogGroupKmsKey
 
   WisdomAssistantLogsDelivery:
     DeletionPolicy: !Ref RemovalPolicy
