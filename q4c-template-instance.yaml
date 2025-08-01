@@ -2,6 +2,17 @@ AWSTemplateFormatVersion: "2010-09-09"
 
 Description: Q for customers - Instance (uksb-mv8fzn8jjm) (tag:instance)
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General
+        Parameters:
+          - DeploymentId
+    ParameterLabels:
+      DeploymentId:
+        default: Deployment Identifier
+
 Parameters:
   DeploymentId:
     Description: Unique identifier for this deployment
