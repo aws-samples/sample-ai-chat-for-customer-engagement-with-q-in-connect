@@ -44,7 +44,7 @@ Parameters:
   DeploymentId:
     Description: Unique identifier for this deployment
     Type: String
-    Default: q-for-customers
+    Default: q4c-sample
     AllowedPattern: ^[a-zA-Z0-9\-_]+$
     ConstraintDescription: Must contain only alphanumeric characters, dashes, and underscores
     MaxLength: 32
